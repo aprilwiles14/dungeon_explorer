@@ -1,0 +1,244 @@
+"""
+graphics engine for 2D games
+"""
+
+import os
+import numpy as np
+import cv2
+from game import start_game, move_player
+from game import update
+from pygame import mixer
+
+
+TILE_PATH = os.path.split(__file__)[0] + '/tiles'
+
+# title of the game window
+GAME_TITLE = "Dungeon Explorer"
+
+# map keyboard keys to move commands
+MOVES = {
+    "a": "left",
+    "d": "right",
+    "w": "up",
+    "s": "down",
+    " ": "start",
+}
+
+#
+# constants measured in pixels
+#
+SCREEN_SIZE_X, SCREEN_SIZE_Y = 850, 416
+TILE_SIZE = 32
+
+
+def read_image(filename: str) -> np.ndarray:
+    """
+    Reads an image from the given filename and doubles its size.
+    If the image file does not exist, an error is created.
+    """
+    img = cv2.imread(filename)  # sometimes returns None
+    if img is None:
+        raise IOError(f"Image not found: '{filename}'")
+   # img = np.kron(img, np.ones((2, 2, 1), dtype=img.dtype))  # double image size
+    return img
+
+
+def read_images():
+    return {
+        filename[:-4]: read_image(os.path.join(TILE_PATH, filename))
+        for filename in os.listdir(TILE_PATH)
+        if filename.endswith(".png")
+    }
+
+
+def draw_tile(frame, x, y, image, xbase=0, ybase=0):
+    # calculate screen position in pixels
+    xpos = xbase + x * TILE_SIZE
+    ypos = ybase + y * TILE_SIZE
+    # copy the image to the screen
+    frame[ypos : ypos + TILE_SIZE, xpos : xpos + TILE_SIZE] = image
+
+
+def draw_move(frame, move, images):
+    draw_tile(frame, x=move.from_x, y=move.from_y, image=images[move.tile], xbase=move.progress * move.speed_x, ybase=move.progress * move.speed_y)
+    move.progress += 1
+
+
+def clean_moves(game, moves):
+    result = []
+    for m in moves:
+        if m.progress * max(abs(m.speed_x), abs(m.speed_y)) < TILE_SIZE:
+            result.append(m)
+        else:
+            m.complete = True
+            if m.finished is not None:
+                m.finished(game)
+    return result
+
+def is_player_moving(moves):
+    return any([m for m in moves if m.tile == "player"])
+
+SYMBOLS = {".": "floor", "#": "wall", "f": "fountain", "x": "stairs_down", \
+           "$": "coin", "t": "trap", "c": "cracked_wall", "k": "key", "D": \
+               "open_door", "d": "closed_door", "p": "potion", "s":"shield", \
+                   "explosion": "animation/explosion"}
+    
+def draw(game, images, moves):
+    # initialize screen
+    frame = np.zeros((SCREEN_SIZE_Y, SCREEN_SIZE_X, 3), np.uint8)
+    
+    # draw dungeon tiles
+    for y, row in enumerate(game.current_level.level):
+        for x, tile in enumerate(row):
+            draw_tile(frame, x=x, y=y, image = images[SYMBOLS[tile]])
+        
+        # draw teleporters
+        for t in game.current_level.teleporters:
+            draw_tile(frame, x=t.x, y = t.y, image = images["teleporter"])
+        
+        for s in game.current_level.switch:
+            draw_tile(frame, x=s.x, y = s.y, image = images["statue"])
+        
+        for b in game.current_level.box:
+            draw_tile(frame, x=b.x, y = b.y, image = images["wooden_box"])
+        
+        for explosion in game.explosions:
+            if not explosion.complete:
+                draw_explosion(frame, explosion, images)
+        
+        game.explosions = [e for e in game.explosions if not e.complete]
+        
+     #   for f in game.fireball:
+    #        draw_tile(frame, x=f.x, y = f.y, image = images["fireball"])
+        
+    
+    ### DISPLAYS
+    
+    # display level:
+    cv2.putText(frame,
+        f"Level {game.level_number + 1}",
+        org=(650, 30),
+        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+        fontScale=0.9,
+        color=(255, 255, 255),
+        thickness=3,
+        )
+    
+    # display coin count
+    cv2.putText(frame,
+        str(game.coins),
+        org=(690, 80),
+        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+        fontScale=1.5,
+        color=(255, 128, 128),
+        thickness=3,
+        )
+    draw_tile(frame, xbase=620, ybase=50,x=1,y=0, image=images[("coin")])
+        
+    # display life count
+    cv2.putText(frame,
+        str("lives left:"),
+        org=(650, 120),
+        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+        fontScale=0.9,
+        color=(255, 255, 255),
+        thickness=3,
+        )
+
+    for i in range(game.health):
+        draw_tile(frame, xbase=650, ybase=140, x=i, y=0, image=images[("heart")])
+            
+    for i, item in enumerate(game.items):
+        y = i // 2  # floor division: rounded down
+        x = i % 2   # modulo: remainder of an integer division
+        draw_tile(frame, xbase=660, ybase=200, x=x, y=y, image=images[item])
+
+    # draw player
+    while game.current_level.moves:
+        moves.append(game.current_level.moves.pop())
+    if not is_player_moving(moves):
+        draw_tile(frame=frame, x=game.x, y=game.y, image=images["player"])
+    
+    # draw everything that moves
+    for m in moves:
+        draw_move(frame=frame, move=m, images=images)
+        
+    #       y      x     blue green red
+   # frame[0:100, 0:100] = (255,255,255)
+
+    # display complete image
+    cv2.imshow(GAME_TITLE, frame)
+
+def draw_explosion(frame, explosion, images):
+    if "explosion" not in images:
+        print("error: 'explosion' images not loaded")
+        return
+    framex = explosion.frame % 4
+    framey = explosion.frame // 4
+    tile = images["explosion"][framey & TILE_SIZE: (framey + 1) * TILE_SIZE, framex * TILE_SIZE:(framex + 1) * TILE_SIZE]
+    draw_tile(frame, x = explosion.x, y = explosion.y, image=tile)
+
+    # delay between frames
+    explosion.delay += 1
+    if explosion.delay >= explosion.max_delay:
+        explosion.delay = 0
+        explosion.frame += 1
+    
+    # Mark complete when all frames have played
+    if explosion.frame >= explosion.max_frame:
+        explosion.complete = True
+
+def handle_keyboard(game):
+    """keys are mapped to move commands"""
+    key = chr(cv2.waitKey(1) & 0xFF)
+    if key == "q":
+        game.current_level.status = "exited"
+    return MOVES.get(key)
+
+
+def main():
+    mixer.init()
+    from cutscene import show_cutscene
+    
+    if not show_cutscene():
+        return
+    
+    images = read_images()
+    game = start_game()
+        
+    current_music = game.current_level.music
+    mixer.music.load(current_music)
+    # mixer.music.play(loops =- 1)
+    mixer.music.play(-1)
+    
+    queued_move = None
+    moves = []
+    while game.status == "running":
+        draw(game, images, moves)
+        moves = clean_moves(game, moves)
+        queued_move = handle_keyboard(game)
+        update(game)
+        
+        #  check for level change
+        if game.current_level.music != current_music:
+            current_music = game.current_level.music
+            mixer.music.load(current_music)
+            mixer.music.play(-1)
+        
+        if not is_player_moving(moves):
+            move_player(game, queued_move)
+        
+       # if not is_player_moving(moves) and queued_move:
+            # only move player if key pressed
+         #   move_player(game, queued_move)
+
+
+    cv2.destroyAllWindows()
+    mixer.music.stop()
+
+if __name__ == '__main__':
+    main()
+
+
+
+        
